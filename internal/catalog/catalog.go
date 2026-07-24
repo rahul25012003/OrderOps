@@ -13,6 +13,7 @@ import (
 
 	"github.com/rahul25012003/orderops/internal/platform/db"
 	"github.com/rahul25012003/orderops/internal/platform/httpkit"
+	"github.com/rahul25012003/orderops/internal/platform/tracing"
 )
 
 const schema = `
@@ -47,8 +48,9 @@ var seed = []Product{
 
 // Service is the catalog HTTP service.
 type Service struct {
-	DB  *sql.DB
-	Log *slog.Logger
+	DB     *sql.DB
+	Log    *slog.Logger
+	Tracer tracing.Exporter
 
 	mu     sync.RWMutex
 	cache  []Product
@@ -84,7 +86,7 @@ func (s *Service) Router() http.Handler {
 	})
 	mux.HandleFunc("GET /products", s.listProducts)
 	mux.HandleFunc("GET /products/{id}", s.getProduct)
-	return httpkit.Middleware(s.Log, mux)
+	return httpkit.Middleware("catalog", s.Log, s.Tracer, mux)
 }
 
 func (s *Service) listProducts(w http.ResponseWriter, r *http.Request) {

@@ -17,13 +17,17 @@ import (
 	"time"
 
 	"github.com/rahul25012003/orderops/internal/platform/resilience"
+	"github.com/rahul25012003/orderops/internal/platform/tracing"
 )
 
 // --- tracing (W3C traceparent, hand-propagated — ADR-004) -------------------
 
 type ctxKey int
 
-const traceKey ctxKey = 0
+const (
+	traceKey ctxKey = iota
+	spanKey
+)
 
 // TraceID returns the current trace id ("" if none).
 func TraceID(ctx context.Context) string {
@@ -36,6 +40,18 @@ func WithTrace(ctx context.Context, traceID string) context.Context {
 	return context.WithValue(ctx, traceKey, traceID)
 }
 
+// SpanID returns the current (server) span id — the parent for any outbound
+// call made while handling this request.
+func SpanID(ctx context.Context) string {
+	v, _ := ctx.Value(spanKey).(string)
+	return v
+}
+
+// WithSpan stores the current span id on the context.
+func WithSpan(ctx context.Context, spanID string) context.Context {
+	return context.WithValue(ctx, spanKey, spanID)
+}
+
 // NewTraceID mints a 16-byte hex trace id.
 func NewTraceID() string {
 	b := make([]byte, 16)
@@ -43,20 +59,36 @@ func NewTraceID() string {
 	return hex.EncodeToString(b)
 }
 
-// Middleware extracts/mints the trace id, logs the request, and serves.
-func Middleware(log *slog.Logger, next http.Handler) http.Handler {
+// Middleware extracts/mints the trace context, records a SERVER span, logs
+// the request, and serves. Pass a tracing.Exporter (nil = disabled).
+func Middleware(service string, log *slog.Logger, exp tracing.Exporter,
+	next http.Handler) http.Handler {
+	if exp == nil {
+		exp = tracing.Nop{}
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		traceID := parseTraceparent(r.Header.Get("traceparent"))
+		traceID, parentSpan := parseTraceContext(r.Header.Get("traceparent"))
 		if traceID == "" {
 			traceID = NewTraceID()
 		}
-		ctx := WithTrace(r.Context(), traceID)
+		span := tracing.NewSpanID()
+		ctx := WithSpan(WithTrace(r.Context(), traceID), span)
 		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w, status: 200}
 		next.ServeHTTP(sw, r.WithContext(ctx))
-		log.Info("http", "method", r.Method, "path", r.URL.Path,
-			"status", sw.status, "ms", time.Since(start).Milliseconds(),
-			"trace", traceID)
+		if log != nil {
+			log.Info("http", "method", r.Method, "path", r.URL.Path,
+				"status", sw.status, "ms", time.Since(start).Milliseconds(),
+				"trace", traceID)
+		}
+		name := r.Pattern
+		if name == "" {
+			name = r.Method + " " + r.URL.Path
+		}
+		exp.Emit(tracing.Span{TraceID: traceID, SpanID: span,
+			ParentID: parentSpan, Service: service, Name: name, Kind: "server",
+			StartNS: start.UnixNano(), EndNS: time.Now().UnixNano(),
+			Status: sw.status})
 	})
 }
 
@@ -70,18 +102,35 @@ func (w *statusWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
-func parseTraceparent(h string) string {
-	// "00-<32 hex trace-id>-<16 hex span-id>-<flags>"
-	if len(h) >= 35+16+3 && h[0:3] == "00-" {
-		return h[3:35]
+// Flush + Unwrap keep the wrapper transparent to SSE: without them the
+// embedded interface hides the underlying Flusher, and every event stream
+// (notification, the gateway's proxy passthrough) would buffer forever.
+func (w *statusWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
 	}
-	return ""
 }
 
-func traceparent(traceID string) string {
-	span := make([]byte, 8)
-	rand.Read(span)
-	return fmt.Sprintf("00-%s-%s-01", traceID, hex.EncodeToString(span))
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// parseTraceContext extracts (traceID, spanID) from a traceparent header:
+// "00-<32 hex trace-id>-<16 hex span-id>-<flags>".
+func parseTraceContext(h string) (traceID, spanID string) {
+	if len(h) >= 55 && h[0:3] == "00-" {
+		return h[3:35], h[36:52]
+	}
+	return "", ""
+}
+
+func formatTraceparent(traceID, spanID string) string {
+	return fmt.Sprintf("00-%s-%s-01", traceID, spanID)
+}
+
+// Traceparent builds a W3C traceparent header value — exported so an edge
+// proxy (the gateway) can inject the current trace context onto the request
+// it forwards, stitching the whole hop chain into one trace.
+func Traceparent(traceID, spanID string) string {
+	return formatTraceparent(traceID, spanID)
 }
 
 // --- JSON helpers -----------------------------------------------------------
@@ -108,11 +157,14 @@ func Decode(w http.ResponseWriter, r *http.Request, into any) bool {
 // --- resilient inter-service client -----------------------------------------
 
 // Client calls sibling services with per-target circuit breakers, retries
-// with jittered backoff, hard timeouts, and traceparent propagation.
+// with jittered backoff, hard timeouts, and traceparent propagation. Each
+// logical call emits one CLIENT span parented on the caller's server span.
 type Client struct {
 	HTTP     *http.Client
 	Attempts int           // per call (default 3)
 	Backoff  time.Duration // base retry delay (default 100ms)
+	Service  string        // caller name stamped on client spans
+	Tracer   tracing.Exporter
 
 	mu       sync.Mutex
 	breakers map[string]*resilience.Breaker
@@ -123,6 +175,13 @@ func NewClient(timeout time.Duration) *Client {
 		HTTP:     &http.Client{Timeout: timeout},
 		breakers: map[string]*resilience.Breaker{},
 	}
+}
+
+func (c *Client) tracer() tracing.Exporter {
+	if c.Tracer != nil {
+		return c.Tracer
+	}
+	return tracing.Nop{}
 }
 
 func (c *Client) breaker(target string) *resilience.Breaker {
@@ -187,7 +246,14 @@ func (c *Client) do(ctx context.Context, method, target, path string,
 			return err
 		}
 	}
-	return resilience.Do(ctx, c.breaker(target), attempts, backoff,
+
+	traceID := TraceID(ctx)
+	clientSpan := tracing.NewSpanID() // downstream sees this as its parent
+	parent := SpanID(ctx)
+	start := time.Now()
+	status := 0
+
+	err := resilience.Do(ctx, c.breaker(target), attempts, backoff,
 		func(ctx context.Context) error {
 			req, err := http.NewRequestWithContext(ctx, method,
 				target+path, bytes.NewReader(payload))
@@ -195,14 +261,16 @@ func (c *Client) do(ctx context.Context, method, target, path string,
 				return err
 			}
 			req.Header.Set("Content-Type", "application/json")
-			if t := TraceID(ctx); t != "" {
-				req.Header.Set("traceparent", traceparent(t))
+			if traceID != "" {
+				req.Header.Set("traceparent",
+					formatTraceparent(traceID, clientSpan))
 			}
 			resp, err := c.HTTP.Do(req)
 			if err != nil {
 				return err
 			}
 			defer resp.Body.Close()
+			status = resp.StatusCode
 			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 			if resp.StatusCode < 200 || resp.StatusCode > 299 {
 				se := &StatusError{Code: resp.StatusCode,
@@ -219,4 +287,16 @@ func (c *Client) do(ctx context.Context, method, target, path string,
 			}
 			return nil
 		})
+
+	if traceID != "" {
+		errStr := ""
+		if err != nil {
+			errStr = err.Error()
+		}
+		c.tracer().Emit(tracing.Span{TraceID: traceID, SpanID: clientSpan,
+			ParentID: parent, Service: c.Service, Name: method + " " + path,
+			Kind: "client", StartNS: start.UnixNano(),
+			EndNS: time.Now().UnixNano(), Status: status, Err: errStr})
+	}
+	return err
 }

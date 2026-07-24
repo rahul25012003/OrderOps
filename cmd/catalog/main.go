@@ -13,6 +13,8 @@ import (
 func main() {
 	addr := flag.String("addr", ":7001", "listen address")
 	dbPath := flag.String("db", "data/catalog.sqlite", "database path")
+	collectorURL := flag.String("collector", svc.EnvOr("COLLECTOR_URL", ""),
+		"trace collector URL (optional)")
 	flag.Parse()
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil)).With("svc", "catalog")
 
@@ -22,5 +24,6 @@ func main() {
 
 	ctx, stop := svc.SignalContext()
 	defer stop()
+	s.Tracer = svc.StartTracer(ctx, *collectorURL)
 	svc.Fatal(log, "serve", svc.Serve(ctx, *addr, s.Router(), log))
 }

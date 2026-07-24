@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/rahul25012003/orderops/internal/platform/events"
+	"github.com/rahul25012003/orderops/internal/platform/tracing"
 )
 
 // SignalContext returns a context cancelled on Ctrl-C.
@@ -50,6 +51,19 @@ func StartRelay(ctx context.Context, db *sql.DB, source, redisAddr string,
 	relay := &events.Relay{DB: db, Bus: bus, Source: source, Log: log}
 	go relay.Run(ctx, 300*time.Millisecond)
 	return bus
+}
+
+// StartTracer wires a best-effort span exporter to the collector when
+// collectorURL is set (env COLLECTOR_URL), else returns a no-op exporter.
+// The flush goroutine stops with ctx. Absence of a collector never affects
+// the request path — spans are simply dropped.
+func StartTracer(ctx context.Context, collectorURL string) tracing.Exporter {
+	if collectorURL == "" {
+		return tracing.Nop{}
+	}
+	exp := tracing.NewHTTPExporter(collectorURL)
+	go exp.Run(ctx)
+	return exp
 }
 
 // EnvOr reads an env var with a fallback.

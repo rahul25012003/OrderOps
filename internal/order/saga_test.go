@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -253,6 +254,51 @@ func TestSagaRecoveryResumesCrashedOrder(t *testing.T) {
 	o, _ := w.order.loadOrder(ctx, "ord-crashed")
 	if o.State != StateConfirmed {
 		t.Fatalf("recovered saga state %s (%s)", o.State, o.Reason)
+	}
+}
+
+func TestConcurrentCreatesGetUniqueIDs(t *testing.T) {
+	w := newWorld(t)
+	const n = 60
+	ids := make(chan string, n)
+	errs := make(chan int, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp, err := http.Post(w.orderSrv.URL+"/orders", "application/json",
+				bytes.NewReader([]byte(
+					`{"customer":"load","items":[{"product_id":"filter-coffee","qty":1}]}`)))
+			if err != nil {
+				errs <- 0
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != 201 {
+				errs <- resp.StatusCode
+				return
+			}
+			var o Order
+			json.NewDecoder(resp.Body).Decode(&o)
+			ids <- o.ID
+		}()
+	}
+	wg.Wait()
+	close(ids)
+	close(errs)
+	if len(errs) > 0 {
+		t.Fatalf("%d/%d concurrent creates failed (id collision → 500)", len(errs), n)
+	}
+	seen := map[string]bool{}
+	for id := range ids {
+		if seen[id] {
+			t.Fatalf("duplicate order id under concurrency: %s", id)
+		}
+		seen[id] = true
+	}
+	if len(seen) != n {
+		t.Fatalf("got %d unique ids, want %d", len(seen), n)
 	}
 }
 

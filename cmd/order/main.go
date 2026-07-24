@@ -23,10 +23,13 @@ func main() {
 		"http://127.0.0.1:7002"), "inventory service URL")
 	paymentURL := flag.String("payment", svc.EnvOr("PAYMENT_URL",
 		"http://127.0.0.1:7003"), "payment service URL")
+	collectorURL := flag.String("collector", svc.EnvOr("COLLECTOR_URL", ""),
+		"trace collector URL (optional)")
 	flag.Parse()
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil)).With("svc", "order")
 
 	client := httpkit.NewClient(3 * time.Second)
+	client.Service = "order"
 	s, err := order.New(*dbPath, client, *catalogURL, *inventoryURL,
 		*paymentURL, log)
 	svc.Fatal(log, "init", err)
@@ -34,6 +37,9 @@ func main() {
 
 	ctx, stop := svc.SignalContext()
 	defer stop()
+	tracer := svc.StartTracer(ctx, *collectorURL)
+	s.Tracer = tracer
+	client.Tracer = tracer
 	bus := svc.StartRelay(ctx, s.DB, "order", *redisAddr, log)
 	defer bus.Close()
 	go s.RunRecovery(ctx, 5*time.Second, 15*time.Second)

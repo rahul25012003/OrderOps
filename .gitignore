@@ -1,6 +1,9 @@
 tools/
 bin/
 data/
+data-smoke/
+data-bench/
+data-diag/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal

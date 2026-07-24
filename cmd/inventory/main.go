@@ -15,6 +15,8 @@ func main() {
 	dbPath := flag.String("db", "data/inventory.sqlite", "database path")
 	redisAddr := flag.String("redis", svc.EnvOr("REDIS_ADDR", "127.0.0.1:6379"),
 		"redis address (event bus)")
+	collectorURL := flag.String("collector", svc.EnvOr("COLLECTOR_URL", ""),
+		"trace collector URL (optional)")
 	flag.Parse()
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil)).With("svc", "inventory")
 
@@ -24,6 +26,7 @@ func main() {
 
 	ctx, stop := svc.SignalContext()
 	defer stop()
+	s.Tracer = svc.StartTracer(ctx, *collectorURL)
 	bus := svc.StartRelay(ctx, s.DB, "inventory", *redisAddr, log)
 	defer bus.Close()
 	svc.Fatal(log, "serve", svc.Serve(ctx, *addr, s.Router(), log))

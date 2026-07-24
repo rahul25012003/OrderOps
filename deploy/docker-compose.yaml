@@ -1,0 +1,88 @@
+# The whole system in one command — wherever Docker is available:
+#
+#   docker compose -f deploy/docker-compose.yaml up --build
+#   open http://localhost:7000      (storefront)
+#   open http://localhost:7000/ops  (ops console)
+#
+# Mirrors the k8s topology (deploy/k8s/orderops.yaml): one container per
+# service, Redis as the bus, only the gateway published to the host.
+name: orderops
+
+x-svc: &svc
+  build: { context: .. }
+  restart: unless-stopped
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["--appendonly", "yes"]
+
+  catalog:
+    <<: *svc
+    build: { context: .., args: { SVC: catalog } }
+    environment: { COLLECTOR_URL: http://collector:7007 }
+    depends_on: [collector]
+
+  inventory:
+    <<: *svc
+    build: { context: .., args: { SVC: inventory } }
+    environment:
+      REDIS_ADDR: redis:6379
+      COLLECTOR_URL: http://collector:7007
+    depends_on: [redis, collector]
+
+  payment:
+    <<: *svc
+    build: { context: .., args: { SVC: payment } }
+    environment:
+      REDIS_ADDR: redis:6379
+      COLLECTOR_URL: http://collector:7007
+    depends_on: [redis, collector]
+
+  auth:
+    <<: *svc
+    build: { context: .., args: { SVC: auth } }
+    environment:
+      AUTH_SECRET: dev-secret-change-me
+      COLLECTOR_URL: http://collector:7007
+    depends_on: [collector]
+
+  order:
+    <<: *svc
+    build: { context: .., args: { SVC: order } }
+    environment:
+      REDIS_ADDR: redis:6379
+      COLLECTOR_URL: http://collector:7007
+      CATALOG_URL: http://catalog:7001
+      INVENTORY_URL: http://inventory:7002
+      PAYMENT_URL: http://payment:7003
+    depends_on: [redis, catalog, inventory, payment, collector]
+
+  notification:
+    <<: *svc
+    build: { context: .., args: { SVC: notification } }
+    environment:
+      REDIS_ADDR: redis:6379
+      COLLECTOR_URL: http://collector:7007
+    depends_on: [redis, collector]
+
+  collector:
+    <<: *svc
+    build: { context: .., args: { SVC: collector } }
+    environment: { REDIS_ADDR: redis:6379 }
+    depends_on: [redis]
+
+  gateway:
+    <<: *svc
+    build: { context: .., args: { SVC: gateway } }
+    ports: ["7000:7000"]  # the only public surface
+    environment:
+      AUTH_SECRET: dev-secret-change-me
+      COLLECTOR_URL: http://collector:7007
+      COLLECTOR_URL_HTTP: http://collector:7007
+      AUTH_URL: http://auth:7005
+      CATALOG_URL: http://catalog:7001
+      INVENTORY_URL: http://inventory:7002
+      ORDER_URL: http://order:7004
+      NOTIFICATION_URL: http://notification:7006
+    depends_on: [auth, catalog, inventory, order, notification, collector]

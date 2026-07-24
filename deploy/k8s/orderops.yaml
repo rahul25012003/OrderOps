@@ -1,0 +1,333 @@
+# OrderOps on Kubernetes — AUTHORED, NOT CLUSTER-VERIFIED (ADR-001).
+#
+# The dev machine has no Docker/K8s, so these manifests are written to be
+# correct-by-inspection rather than apply-tested. They encode the intended
+# production topology: one Deployment + Service per microservice, Redis as
+# the event bus, the gateway behind an Ingress as the only public surface.
+#
+# Honest caveat: each service uses SQLite on an emptyDir here — fine for a
+# demo, WRONG for real production (pod restart loses data). The swap-ready
+# seam (ADR-001/003) is where a managed Postgres per service would go; the
+# manifest is otherwise production-shaped (probes, resources, HPA, secrets).
+#
+#   kubectl apply -f deploy/k8s/orderops.yaml
+#   kubectl -n orderops port-forward svc/gateway 7000:7000
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: orderops
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: orderops-secrets
+  namespace: orderops
+type: Opaque
+stringData:
+  # rotate in a real cluster; sourced from a real secret manager
+  AUTH_SECRET: "change-me-in-production"
+---
+# --- Redis (event bus) ------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: orderops
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: redis } }
+  template:
+    metadata: { labels: { app: redis } }
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          args: ["--appendonly", "yes"]
+          ports: [{ containerPort: 6379 }]
+          resources:
+            requests: { cpu: "50m", memory: "64Mi" }
+            limits: { cpu: "500m", memory: "256Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: orderops
+spec:
+  selector: { app: redis }
+  ports: [{ port: 6379, targetPort: 6379 }]
+---
+# --- catalog :7001 ----------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: catalog, namespace: orderops }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: catalog } }
+  template:
+    metadata: { labels: { app: catalog } }
+    spec:
+      containers:
+        - name: catalog
+          image: ghcr.io/rahul25012003/orderops-catalog:latest
+          ports: [{ containerPort: 7001 }]
+          env:
+            - { name: COLLECTOR_URL, value: "http://collector:7007" }
+          readinessProbe: { httpGet: { path: /health, port: 7001 }, initialDelaySeconds: 2, periodSeconds: 5 }
+          livenessProbe: { httpGet: { path: /health, port: 7001 }, periodSeconds: 10 }
+          resources:
+            requests: { cpu: "50m", memory: "32Mi" }
+            limits: { cpu: "300m", memory: "128Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: catalog, namespace: orderops }
+spec:
+  selector: { app: catalog }
+  ports: [{ port: 7001, targetPort: 7001 }]
+---
+# --- inventory :7002 --------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: inventory, namespace: orderops }
+spec:
+  replicas: 1  # single writer per SQLite; scale needs the Postgres seam
+  selector: { matchLabels: { app: inventory } }
+  template:
+    metadata: { labels: { app: inventory } }
+    spec:
+      containers:
+        - name: inventory
+          image: ghcr.io/rahul25012003/orderops-inventory:latest
+          ports: [{ containerPort: 7002 }]
+          env:
+            - { name: REDIS_ADDR, value: "redis:6379" }
+            - { name: COLLECTOR_URL, value: "http://collector:7007" }
+          readinessProbe: { httpGet: { path: /health, port: 7002 }, initialDelaySeconds: 2, periodSeconds: 5 }
+          livenessProbe: { httpGet: { path: /health, port: 7002 }, periodSeconds: 10 }
+          resources:
+            requests: { cpu: "50m", memory: "48Mi" }
+            limits: { cpu: "300m", memory: "128Mi" }
+      volumes: [{ name: data, emptyDir: {} }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: inventory, namespace: orderops }
+spec:
+  selector: { app: inventory }
+  ports: [{ port: 7002, targetPort: 7002 }]
+---
+# --- payment :7003 ----------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: payment, namespace: orderops }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: payment } }
+  template:
+    metadata: { labels: { app: payment } }
+    spec:
+      containers:
+        - name: payment
+          image: ghcr.io/rahul25012003/orderops-payment:latest
+          ports: [{ containerPort: 7003 }]
+          env:
+            - { name: REDIS_ADDR, value: "redis:6379" }
+            - { name: COLLECTOR_URL, value: "http://collector:7007" }
+          readinessProbe: { httpGet: { path: /health, port: 7003 }, initialDelaySeconds: 2, periodSeconds: 5 }
+          livenessProbe: { httpGet: { path: /health, port: 7003 }, periodSeconds: 10 }
+          resources:
+            requests: { cpu: "50m", memory: "48Mi" }
+            limits: { cpu: "300m", memory: "128Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: payment, namespace: orderops }
+spec:
+  selector: { app: payment }
+  ports: [{ port: 7003, targetPort: 7003 }]
+---
+# --- order :7004 (saga orchestrator) ----------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: order, namespace: orderops }
+spec:
+  replicas: 1  # each replica owns its saga DB; multi-writer needs Postgres
+  selector: { matchLabels: { app: order } }
+  template:
+    metadata: { labels: { app: order } }
+    spec:
+      containers:
+        - name: order
+          image: ghcr.io/rahul25012003/orderops-order:latest
+          ports: [{ containerPort: 7004 }]
+          env:
+            - { name: REDIS_ADDR, value: "redis:6379" }
+            - { name: COLLECTOR_URL, value: "http://collector:7007" }
+            - { name: CATALOG_URL, value: "http://catalog:7001" }
+            - { name: INVENTORY_URL, value: "http://inventory:7002" }
+            - { name: PAYMENT_URL, value: "http://payment:7003" }
+          readinessProbe: { httpGet: { path: /health, port: 7004 }, initialDelaySeconds: 2, periodSeconds: 5 }
+          livenessProbe: { httpGet: { path: /health, port: 7004 }, periodSeconds: 10 }
+          resources:
+            requests: { cpu: "100m", memory: "64Mi" }
+            limits: { cpu: "500m", memory: "192Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: order, namespace: orderops }
+spec:
+  selector: { app: order }
+  ports: [{ port: 7004, targetPort: 7004 }]
+---
+# --- auth :7005 -------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: auth, namespace: orderops }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: auth } }
+  template:
+    metadata: { labels: { app: auth } }
+    spec:
+      containers:
+        - name: auth
+          image: ghcr.io/rahul25012003/orderops-auth:latest
+          ports: [{ containerPort: 7005 }]
+          env:
+            - { name: COLLECTOR_URL, value: "http://collector:7007" }
+            - name: AUTH_SECRET
+              valueFrom: { secretKeyRef: { name: orderops-secrets, key: AUTH_SECRET } }
+          readinessProbe: { httpGet: { path: /health, port: 7005 }, initialDelaySeconds: 2, periodSeconds: 5 }
+          resources:
+            requests: { cpu: "50m", memory: "48Mi" }
+            limits: { cpu: "300m", memory: "128Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: auth, namespace: orderops }
+spec:
+  selector: { app: auth }
+  ports: [{ port: 7005, targetPort: 7005 }]
+---
+# --- notification :7006 (SSE hub) -------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: notification, namespace: orderops }
+spec:
+  replicas: 1  # in-memory hub; sticky sessions or shared pub/sub to scale
+  selector: { matchLabels: { app: notification } }
+  template:
+    metadata: { labels: { app: notification } }
+    spec:
+      containers:
+        - name: notification
+          image: ghcr.io/rahul25012003/orderops-notification:latest
+          ports: [{ containerPort: 7006 }]
+          env:
+            - { name: REDIS_ADDR, value: "redis:6379" }
+            - { name: COLLECTOR_URL, value: "http://collector:7007" }
+          readinessProbe: { httpGet: { path: /health, port: 7006 }, initialDelaySeconds: 2, periodSeconds: 5 }
+          resources:
+            requests: { cpu: "50m", memory: "48Mi" }
+            limits: { cpu: "300m", memory: "128Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: notification, namespace: orderops }
+spec:
+  selector: { app: notification }
+  ports: [{ port: 7006, targetPort: 7006 }]
+---
+# --- collector :7007 (traces + event log) -----------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: collector, namespace: orderops }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: collector } }
+  template:
+    metadata: { labels: { app: collector } }
+    spec:
+      containers:
+        - name: collector
+          image: ghcr.io/rahul25012003/orderops-collector:latest
+          ports: [{ containerPort: 7007 }]
+          env:
+            - { name: REDIS_ADDR, value: "redis:6379" }
+          readinessProbe: { httpGet: { path: /health, port: 7007 }, initialDelaySeconds: 2, periodSeconds: 5 }
+          resources:
+            requests: { cpu: "50m", memory: "64Mi" }
+            limits: { cpu: "400m", memory: "256Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: collector, namespace: orderops }
+spec:
+  selector: { app: collector }
+  ports: [{ port: 7007, targetPort: 7007 }]
+---
+# --- gateway :7000 (edge — the only public surface) -------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: gateway, namespace: orderops }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: gateway } }
+  template:
+    metadata: { labels: { app: gateway } }
+    spec:
+      containers:
+        - name: gateway
+          image: ghcr.io/rahul25012003/orderops-gateway:latest
+          ports: [{ containerPort: 7000 }]
+          env:
+            - { name: COLLECTOR_URL, value: "http://collector:7007" }
+            - { name: COLLECTOR_URL_HTTP, value: "http://collector:7007" }
+            - { name: AUTH_URL, value: "http://auth:7005" }
+            - { name: CATALOG_URL, value: "http://catalog:7001" }
+            - { name: INVENTORY_URL, value: "http://inventory:7002" }
+            - { name: ORDER_URL, value: "http://order:7004" }
+            - { name: NOTIFICATION_URL, value: "http://notification:7006" }
+            - name: AUTH_SECRET
+              valueFrom: { secretKeyRef: { name: orderops-secrets, key: AUTH_SECRET } }
+          readinessProbe: { httpGet: { path: /health, port: 7000 }, initialDelaySeconds: 2, periodSeconds: 5 }
+          livenessProbe: { httpGet: { path: /health, port: 7000 }, periodSeconds: 10 }
+          resources:
+            requests: { cpu: "100m", memory: "64Mi" }
+            limits: { cpu: "500m", memory: "192Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: gateway, namespace: orderops }
+spec:
+  selector: { app: gateway }
+  ports: [{ port: 7000, targetPort: 7000 }]
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: { name: gateway, namespace: orderops }
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: gateway }
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: 70 } }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: orderops
+  namespace: orderops
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"  # SSE must not buffer
+spec:
+  rules:
+    - host: orderops.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: gateway, port: { number: 7000 } } }

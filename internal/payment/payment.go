@@ -19,6 +19,7 @@ import (
 	"github.com/rahul25012003/orderops/internal/platform/db"
 	"github.com/rahul25012003/orderops/internal/platform/events"
 	"github.com/rahul25012003/orderops/internal/platform/httpkit"
+	"github.com/rahul25012003/orderops/internal/platform/tracing"
 )
 
 const schema = `
@@ -33,8 +34,9 @@ CREATE TABLE IF NOT EXISTS payments (
 
 // Service is the payment HTTP service.
 type Service struct {
-	DB  *sql.DB
-	Log *slog.Logger
+	DB     *sql.DB
+	Log    *slog.Logger
+	Tracer tracing.Exporter
 }
 
 func New(dbPath string, log *slog.Logger) (*Service, error) {
@@ -55,7 +57,7 @@ func (s *Service) Router() http.Handler {
 	})
 	mux.HandleFunc("POST /authorize", s.authorize)
 	mux.HandleFunc("POST /refund", s.refund)
-	return httpkit.Middleware(s.Log, mux)
+	return httpkit.Middleware("payment", s.Log, s.Tracer, mux)
 }
 
 type authRequest struct {

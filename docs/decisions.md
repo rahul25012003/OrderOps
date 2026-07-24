@@ -50,8 +50,8 @@ to notification event. A lightweight in-repo collector + waterfall UI is
 planned; OTel SDK export can replace the hand-rolled layer without
 touching call sites.
 
-**Consequences.** No spans/timings yet — trace continuity first, depth
-next.
+**Consequences.** Continuity shipped first; **depth followed** — real spans
+with timings now exist (ADR-009), rendered as a waterfall in the ops console.
 
 ## ADR-005 — Saga: commands are synchronous HTTP, facts are async events
 
@@ -81,3 +81,85 @@ trips the breaker (the dependency answered; the request was wrong).
 
 **Consequences.** The scripted PSP (amounts ending 99 decline, 42 are
 slow, PAYMENT_DOWN=1 kills it) makes every path demoable on demand.
+
+## ADR-007 — One gateway owns every cross-cutting concern
+
+**Context.** Auth, rate limiting, TLS termination, static hosting and the
+tracing entry point could be duplicated across services — or centralized.
+
+**Decision.** A single edge gateway (`internal/gateway`) is the ONLY public
+surface. It serves the two SPAs, verifies JWTs, rate-limits per client IP
+(token bucket), reverse-proxies `/api/*` to internal services, and mints the
+root trace. Internal services trust the network and stay focused on their
+domain. Identity is passed downstream as `X-User-ID`/`X-User-Role` headers
+the gateway sets AFTER verification (and overwrites, so a client can't spoof
+them).
+
+**Consequences.** The gateway is a availability chokepoint — hence 2 replicas
++ HPA in k8s. Its concerns are unit-tested in isolation (auth gate, spoof
+rejection, rate-limit trip, fan-out aggregation).
+
+## ADR-008 — Stateless JWT, hand-rolled HS256, verified at the edge
+
+**Context.** Auth needs to scale without a session store, and the token
+format shouldn't be a black box in a portfolio project.
+
+**Decision.** The auth service signs HS256 JWTs; the gateway verifies them
+LOCALLY with the shared secret — no auth round-trip per request. The JWT is
+~50 lines (`internal/platform/token`), only HS256 is accepted (sidesteps
+`alg:none` and algorithm-confusion), and signatures are checked in constant
+time before any claim is trusted. Passwords use stdlib `crypto/pbkdf2`
+(120k iterations, per-user salt) — no bcrypt dependency.
+
+**Consequences.** Secret rotation invalidates all tokens (acceptable at this
+scale; a JWKS/kid scheme is the seam for rotation-without-logout). Tamper and
+expiry are unit-tested, including a privilege-escalation forgery attempt.
+
+## ADR-009 — Real spans exported best-effort to an in-repo collector
+
+**Context.** ADR-004 gave trace CONTINUITY (one id across hops) but no
+timings. A Jaeger/OTel-collector needs containers.
+
+**Decision.** Every HTTP hop emits a span (server-side in the middleware,
+client-side in the resilient client) carrying trace id, span id and parent
+span id. Spans are exported BEST-EFFORT: buffered channel, batched flush,
+dropped on overflow or collector-down — telemetry NEVER blocks or fails a
+real request. The collector stores spans in SQLite and reconstructs the
+parent/child tree into a Jaeger-style waterfall. The `Exporter` interface is
+the seam: an OTLP exporter slots in behind it untouched.
+
+**Consequences.** Trace depth is real (p50/p95/p99 from server spans, per-hop
+timings in the waterfall) without a single container. The best-effort
+contract is a feature, not a shortcut: observability that can take down the
+system it observes is worse than none.
+
+## ADR-010 — Notification and collector are INDEPENDENT bus consumers
+
+**Context.** Live UI updates and durable observability are different needs
+with different failure tolerances.
+
+**Decision.** Two services consume the same streams under DIFFERENT consumer
+groups: `notification` (live SSE fan-out, in-memory, losing a frame on crash
+is fine) and `collector` (durable event log + trace store). Independent
+offsets mean a slow/restarting collector never stalls the live feed, and vice
+versa — the textbook reason an event backbone beats point-to-point calls.
+
+**Consequences.** Two consumers to run, but each scales and fails on its own
+terms. Notification is deliberately non-durable (a live view); the collector
+is the system of record for events.
+
+## ADR-011 — Order ids are timestamp + monotonic counter, not timestamp alone
+
+**Context.** The load generator surfaced ~14% of creates failing with 500
+under concurrency.
+
+**Decision.** Root cause: `ord-<UnixNano>` collided because Windows' clock
+resolution let concurrent workers share a tick → duplicate primary key. Fix:
+append a process-monotonic atomic counter (`ord-<nanos>-<seq>`), keeping
+time-ordering while guaranteeing uniqueness regardless of clock granularity.
+A regression test fires 60 concurrent creates and asserts unique ids.
+
+**Consequences.** Ids are unique per process (sufficient for the single
+order-service topology); a multi-writer order tier would need a node id or
+ULID — the same seam JobHive uses. The broader lesson is logged: this is the
+bug class unit tests miss and load tests catch.

@@ -20,11 +20,13 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/rahul25012003/orderops/internal/platform/db"
 	"github.com/rahul25012003/orderops/internal/platform/events"
 	"github.com/rahul25012003/orderops/internal/platform/httpkit"
+	"github.com/rahul25012003/orderops/internal/platform/tracing"
 )
 
 const schema = `
@@ -95,6 +97,7 @@ type Service struct {
 	InventoryURL string
 	PaymentURL   string
 	Log          *slog.Logger
+	Tracer       tracing.Exporter
 }
 
 func New(dbPath string, client *httpkit.Client, catalogURL, inventoryURL,
@@ -118,7 +121,7 @@ func (s *Service) Router() http.Handler {
 	mux.HandleFunc("POST /orders", s.createOrder)
 	mux.HandleFunc("GET /orders/{id}", s.getOrder)
 	mux.HandleFunc("GET /orders", s.listOrders)
-	return httpkit.Middleware(s.Log, mux)
+	return httpkit.Middleware("order", s.Log, s.Tracer, mux)
 }
 
 // --- API --------------------------------------------------------------------
@@ -512,6 +515,13 @@ func (s *Service) logger() *slog.Logger {
 
 func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
+// orderSeq guarantees uniqueness under concurrency: on Windows the wall clock
+// resolution is coarse enough that concurrent creates can land on the same
+// UnixNano tick — a timestamp-only id then collides on the primary key and
+// the create 500s. The timestamp keeps ids time-ordered; the atomic counter
+// makes them unique regardless of clock granularity. (Caught by loadgen.)
+var orderSeq atomic.Uint64
+
 func newOrderID() string {
-	return fmt.Sprintf("ord-%d", time.Now().UnixNano())
+	return fmt.Sprintf("ord-%d-%d", time.Now().UnixNano(), orderSeq.Add(1))
 }

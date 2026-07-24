@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OrderOps — Ops Console</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b22; --panel2: #1c2230; --ink: #d7dde5;
+    --muted: #8b95a3; --line: #262d38; --accent: #58a6ff;
+    --ok: #3fb950; --bad: #f85149; --warn: #d29922;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 13.5px/1.5 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, monospace; }
+  header { display: flex; align-items: baseline; gap: 16px;
+    padding: 16px 24px; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: -.01em; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  header .live { margin-left: auto; color: var(--muted); font-size: 12px; }
+  header .live b { color: var(--ok); }
+  .grid { display: grid; gap: 16px; padding: 20px 24px;
+    grid-template-columns: repeat(12, 1fr); max-width: 1440px; margin: 0 auto; }
+  .card { background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 15px 16px; }
+  .card h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .1em;
+    color: var(--muted); margin: 0 0 12px; font-weight: 600; }
+  .col-4 { grid-column: span 4; } .col-6 { grid-column: span 6; }
+  .col-8 { grid-column: span 8; } .col-12 { grid-column: span 12; }
+  @media (max-width: 980px) { .card { grid-column: span 12 !important; } }
+
+  .svc { display: flex; align-items: center; gap: 9px; padding: 6px 0; }
+  .svc .name { flex: 1; }
+  .svc .meta { color: var(--muted); font-size: 11px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  .dot.up { background: var(--ok); box-shadow: 0 0 8px rgba(63,185,80,.5); }
+  .dot.down { background: var(--bad); box-shadow: 0 0 8px rgba(248,81,73,.5); }
+
+  .stat { display: flex; justify-content: space-between; padding: 5px 0;
+    border-bottom: 1px solid var(--line); }
+  .stat:last-child { border-bottom: 0; }
+  .stat b { font-variant-numeric: tabular-nums; }
+  .big { display: flex; gap: 22px; margin-bottom: 6px; }
+  .big div { flex: 1; } .big .n { font-size: 24px; font-weight: 700;
+    font-variant-numeric: tabular-nums; }
+  .big .l { color: var(--muted); font-size: 11px; text-transform: uppercase;
+    letter-spacing: .08em; }
+
+  .brk { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px;
+    border-radius: 6px; margin: 3px 6px 3px 0; font-size: 12px; border: 1px solid var(--line); }
+  .brk.closed { color: var(--ok); } .brk.open { color: var(--bad); border-color: #4a2222; }
+  .brk.halfopen { color: var(--warn); }
+
+  .bar { height: 8px; background: var(--panel2); border-radius: 5px; overflow: hidden; margin-top: 4px; }
+  .bar > span { display: block; height: 100%; background: var(--accent); }
+  .stockrow { padding: 6px 0; }
+  .stockrow .top { display: flex; justify-content: space-between; }
+  .stockrow.low .bar > span { background: var(--warn); }
+
+  .tail { max-height: 320px; overflow-y: auto; font-size: 12.5px; }
+  .ev { display: flex; gap: 10px; padding: 4px 0; border-bottom: 1px solid var(--line); }
+  .ev .t { color: var(--muted); flex: none; width: 66px; }
+  .ev .type { flex: none; width: 150px; }
+  .ev .src { color: var(--muted); flex: 1; text-align: right; }
+  .ev .oid { color: var(--accent); cursor: pointer; }
+  .type.order { color: var(--accent); } .type.stock { color: var(--warn); }
+  .type.payment { color: #a371f7; }
+  .type.cancelled, .type.declined, .type.rejected { color: var(--bad); }
+  .type.confirmed, .type.reserved, .type.authorized { color: var(--ok); }
+
+  .traces { max-height: 200px; overflow-y: auto; }
+  .trace { display: flex; gap: 10px; padding: 5px 0; cursor: pointer;
+    border-bottom: 1px solid var(--line); }
+  .trace:hover { background: var(--panel2); }
+  .trace .root { flex: 1; color: var(--ink); }
+  .trace .d { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .trace.err .root { color: var(--bad); }
+
+  /* waterfall */
+  #wf { margin-top: 10px; }
+  .wfhead { display: flex; justify-content: space-between; color: var(--muted);
+    font-size: 12px; margin-bottom: 8px; }
+  .span { display: flex; align-items: center; gap: 8px; padding: 2px 0; height: 22px; }
+  .span .lbl { width: 210px; flex: none; white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; }
+  .span .lbl .kind { color: var(--muted); }
+  .span .track { flex: 1; position: relative; height: 12px; background: var(--panel2);
+    border-radius: 3px; }
+  .span .seg { position: absolute; height: 100%; border-radius: 3px; min-width: 2px; }
+  .span .dur { width: 66px; flex: none; text-align: right; color: var(--muted);
+    font-variant-numeric: tabular-nums; }
+  .span.err .seg { outline: 1px solid var(--bad); }
+  .evmark { position: absolute; top: -3px; width: 2px; height: 18px; background: #fff3; }
+  .muted { color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>OrderOps</h1><span class="sub">operations console</span>
+  <span class="live">stream <b id="livedot">●</b> <span id="livetxt">connecting…</span></span>
+</header>
+
+<div class="grid">
+  <div class="card col-4">
+    <h2>Services</h2>
+    <div id="services"><span class="muted">loading…</span></div>
+    <h2 style="margin-top:16px">Circuit breakers</h2>
+    <div id="breakers"><span class="muted">—</span></div>
+  </div>
+
+  <div class="card col-4">
+    <h2>Throughput &amp; latency</h2>
+    <div class="big">
+      <div><div class="n" id="s-traces">0</div><div class="l">traces</div></div>
+      <div><div class="n" id="s-spans">0</div><div class="l">spans</div></div>
+      <div><div class="n" id="s-events">0</div><div class="l">events</div></div>
+    </div>
+    <div class="stat"><span>server p50</span><b id="l-p50">–</b></div>
+    <div class="stat"><span>server p95</span><b id="l-p95">–</b></div>
+    <div class="stat"><span>server p99</span><b id="l-p99">–</b></div>
+    <div class="stat"><span>span errors</span><b id="s-errors">0</b></div>
+  </div>
+
+  <div class="card col-4">
+    <h2>Inventory</h2>
+    <div id="stock"><span class="muted">loading…</span></div>
+  </div>
+
+  <div class="card col-6">
+    <h2>Live event stream</h2>
+    <div class="tail" id="tail"></div>
+  </div>
+
+  <div class="card col-6">
+    <h2>Recent traces <span class="muted">— click to inspect</span></h2>
+    <div class="traces" id="traces"></div>
+    <div id="wf"></div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const j = async p => (await fetch(p)).json();
+const SVCPALETTE = { gateway:"#58a6ff", order:"#3fb950", inventory:"#d29922",
+  payment:"#a371f7", catalog:"#e06c9f", auth:"#56d4dd", notification:"#8b95a3",
+  collector:"#8b95a3" };
+const fmtMs = ms => ms >= 1 ? ms.toFixed(1) + "ms" : (ms*1000).toFixed(0) + "µs";
+const domainOf = t => t.split(".")[0];
+const verbOf = t => t.split(".")[1] || "";
+
+// --- overview poll ---
+async function refresh() {
+  let o;
+  try { o = await j("/api/ops/overview"); } catch { return; }
+  // services
+  $("services").innerHTML = "";
+  for (const s of o.services || []) {
+    const el = document.createElement("div"); el.className = "svc";
+    const detail = s.detail && s.detail.subscribers !== undefined
+      ? s.detail.subscribers + " subs" : "";
+    el.innerHTML = `<span class="dot ${s.healthy ? "up":"down"}"></span>
+      <span class="name">${s.name}</span><span class="meta">${detail}</span>`;
+    $("services").appendChild(el);
+  }
+  // breakers
+  const bk = o.breakers || {};
+  const keys = Object.keys(bk);
+  $("breakers").innerHTML = keys.length ? "" :
+    `<span class="muted">all closed / none tripped yet</span>`;
+  for (const [target, state] of Object.entries(bk)) {
+    const short = target.replace(/^https?:\/\//, "");
+    const el = document.createElement("span");
+    el.className = "brk " + String(state).replace("-", "");
+    el.innerHTML = `<span class="dot ${state==="closed"?"up":"down"}"></span>${short} · ${state}`;
+    $("breakers").appendChild(el);
+  }
+  // stats
+  const st = o.stats || {};
+  $("s-traces").textContent = st.traces || 0;
+  $("s-spans").textContent = st.spans || 0;
+  $("s-events").textContent = st.events || 0;
+  $("s-errors").textContent = st.errors || 0;
+  const lat = st.latency_ms || {};
+  $("l-p50").textContent = lat.p50 != null ? fmtMs(lat.p50) : "–";
+  $("l-p95").textContent = lat.p95 != null ? fmtMs(lat.p95) : "–";
+  $("l-p99").textContent = lat.p99 != null ? fmtMs(lat.p99) : "–";
+  // stock
+  const stock = (o.stock && o.stock.stock) || [];
+  $("stock").innerHTML = "";
+  const maxA = Math.max(1, ...stock.map(s => s.available + s.reserved));
+  for (const s of stock) {
+    const low = s.available <= 5;
+    const pct = 100 * s.available / maxA;
+    const el = document.createElement("div");
+    el.className = "stockrow" + (low ? " low" : "");
+    el.innerHTML = `<div class="top"><span>${s.product_id}</span>
+      <span class="muted">${s.available} free · ${s.reserved} held</span></div>
+      <div class="bar"><span style="width:${pct}%"></span></div>`;
+    $("stock").appendChild(el);
+  }
+  loadTraces();
+}
+
+// --- traces + waterfall ---
+async function loadTraces() {
+  let d; try { d = await j("/api/traces"); } catch { return; }
+  const box = $("traces"); box.innerHTML = "";
+  for (const t of d.traces || []) {
+    const el = document.createElement("div");
+    el.className = "trace" + (t.errors ? " err" : "");
+    el.innerHTML = `<span class="root">${t.root} · ${t.name}</span>
+      <span class="d">${t.spans} spans · ${t.duration_ms.toFixed(1)}ms</span>`;
+    el.onclick = () => showTrace(t.trace_id);
+    box.appendChild(el);
+  }
+  if (!d.traces || !d.traces.length)
+    box.innerHTML = `<span class="muted">no traces yet — place an order via the storefront</span>`;
+}
+
+async function showTrace(id) {
+  const t = await j("/api/traces/" + id);
+  const total = t.duration_ms || 1;
+  let html = `<div class="wfhead"><span>trace ${id.slice(0,12)}…</span>
+    <span>${t.duration_ms.toFixed(2)}ms total · ${t.spans.length} spans</span></div>`;
+  for (const s of t.spans) {
+    const left = 100 * s.offset_ms / total;
+    const width = Math.max(0.6, 100 * s.duration_ms / total);
+    const color = SVCPALETTE[s.service] || "#58a6ff";
+    const pad = "&nbsp;".repeat(s.depth * 2);
+    html += `<div class="span ${s.err ? "err":""}">
+      <span class="lbl">${pad}<span class="kind">${s.kind==="client"?"→":"▪"}</span>
+        ${s.service} <span class="muted">${s.name}</span></span>
+      <span class="track"><span class="seg" style="left:${left}%;width:${width}%;
+        background:${color}"></span>${evMarks(t.events, total)}</span>
+      <span class="dur">${fmtMs(s.duration_ms)}</span></div>`;
+  }
+  if (t.events && t.events.length) {
+    html += `<div class="wfhead" style="margin-top:10px"><span>facts on this trace</span></div>`;
+    for (const e of t.events)
+      html += `<div class="ev"><span class="t">+${e.offset_ms.toFixed(0)}ms</span>
+        <span class="type ${verbOf(e.type)}">${e.type}</span>
+        <span class="src">${e.source}</span></div>`;
+  }
+  $("wf").innerHTML = html;
+}
+function evMarks(events, total) {
+  if (!events) return "";
+  return events.map(e => `<span class="evmark" style="left:${100*e.offset_ms/total}%"></span>`).join("");
+}
+
+// --- live tail (SSE + backfill) ---
+function addEvent(e, prepend) {
+  const el = document.createElement("div");
+  el.className = "ev";
+  const time = new Date(e.at).toLocaleTimeString();
+  el.innerHTML = `<span class="t">${time}</span>
+    <span class="type ${domainOf(e.type)} ${verbOf(e.type)}">${e.type}</span>
+    <span class="src"><span class="oid" data-tid="${e.trace_id||""}">${
+      (e.order_id||"").slice(0,14)}</span> · ${e.source}</span>`;
+  const tail = $("tail");
+  if (prepend) tail.appendChild(el); else tail.insertBefore(el, tail.firstChild);
+  while (tail.children.length > 120) tail.removeChild(tail.lastChild);
+}
+$("tail").onclick = e => { const tid = e.target.dataset?.tid; if (tid) showTrace(tid); };
+
+async function startStream() {
+  try { const { events } = await j("/api/recent");
+    (events||[]).forEach(e => addEvent(e, true)); } catch {}
+  const es = new EventSource("/api/events");
+  es.onopen = () => { $("livedot").style.color = "var(--ok)"; $("livetxt").textContent = "live"; };
+  es.onerror = () => { $("livedot").style.color = "var(--bad)"; $("livetxt").textContent = "reconnecting…"; };
+  es.onmessage = ev => addEvent(JSON.parse(ev.data), false);
+}
+
+refresh(); setInterval(refresh, 4000); startStream();
+</script>
+</body>
+</html>

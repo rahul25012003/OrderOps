@@ -13,6 +13,7 @@ import (
 	"github.com/rahul25012003/orderops/internal/platform/db"
 	"github.com/rahul25012003/orderops/internal/platform/events"
 	"github.com/rahul25012003/orderops/internal/platform/httpkit"
+	"github.com/rahul25012003/orderops/internal/platform/tracing"
 )
 
 const schema = `
@@ -44,8 +45,9 @@ type Item struct {
 
 // Service is the inventory HTTP service.
 type Service struct {
-	DB  *sql.DB
-	Log *slog.Logger
+	DB     *sql.DB
+	Log    *slog.Logger
+	Tracer tracing.Exporter
 }
 
 func New(dbPath string, log *slog.Logger) (*Service, error) {
@@ -75,7 +77,7 @@ func (s *Service) Router() http.Handler {
 	mux.HandleFunc("GET /stock", s.listStock)
 	mux.HandleFunc("POST /reserve", s.reserve)
 	mux.HandleFunc("POST /release", s.release)
-	return httpkit.Middleware(s.Log, mux)
+	return httpkit.Middleware("inventory", s.Log, s.Tracer, mux)
 }
 
 type reserveRequest struct {

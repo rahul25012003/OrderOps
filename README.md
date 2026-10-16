@@ -8,8 +8,6 @@ event bus, resilience patterns on every call, JWT auth at a single gateway,
 that streams the system's events as they happen — every guarantee pinned by
 tests that run real services over real HTTP, and by load + chaos runs.
 
-> Mission 2030 · build #4. Plan/tracker:
-> [`../PROJECT_MASTER_PLAN.md`](../PROJECT_MASTER_PLAN.md).
 > **Status: complete — 8 services, 2 UIs, 43 tests, 11 ADRs, load + chaos proven.**
 
 No Docker on the dev machine, so the microservice *principles* are honored
